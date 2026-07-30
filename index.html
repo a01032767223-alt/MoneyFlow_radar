@@ -118,6 +118,9 @@
 
 <main>
 
+  <div class="section-label">🎯 심리 vs 자금흐름 괴리도 <span style="text-transform:none;font-weight:400;">— 각 자산이 지금 어느 국면인지</span></div>
+  <div id="quadrantCard"><div class="loading">사분면 분석 준비 중... (다른 데이터 로딩 후 표시)</div></div>
+
   <div class="section-label">🇰🇷 🇺🇸 주식 지수</div>
   <div id="stockCards"><div class="loading">지수 데이터 로딩 중...</div></div>
 
@@ -144,6 +147,10 @@
 <script>
 // Cloudflare Worker(ict-proxy) 주소 — Yahoo 지수 데이터를 /px 경로로 중계
 const PROXY_BASE = "https://ict-proxy.a01032767223.workers.dev";
+
+// 모듈 C(사분면)용 공유 저장소. 각 로드 함수가 여기에 자산 데이터를 채운다.
+// fgi: 공포탐욕지수(0~100), assets: [{name, momentum(200일선 이격도%), day(전일대비%), price}]
+const RADAR = { fgi: null, assets: [] };
 
 const ATH = {
   kospi: 9385.59,
@@ -249,6 +256,8 @@ async function loadStocks(){
   if(kospi){
     const dd = ((kospi.px-ATH.kospi)/ATH.kospi*100);
     const dayChg = kospi.prev ? ((kospi.px-kospi.prev)/kospi.prev*100) : null;
+    const mom = kospi.ma200 ? ((kospi.px-kospi.ma200)/kospi.ma200*100) : null;
+    RADAR.assets.push({name:'KOSPI', short:'코스피', momentum:mom, day:dayChg, price:kospi.px});
     rows.push(renderIndexCard('KOSPI','코스피', kospi.px, dd, ATH.kospi, getStage(dd), dayChg, kospi.belowMA));
   }else{
     rows.push(`<div class="card"><div class="asset-name">KOSPI <span class="asset-code">코스피</span></div><div class="err">⚠ 조회 실패 — 프록시(/px?syms=^KS11) 응답 확인 필요. 최근 확인 ATH: ${fmtNum(ATH.kospi)} (2026.06.19)</div></div>`);
@@ -257,6 +266,8 @@ async function loadStocks(){
   if(sp500){
     const dd = ((sp500.px-ATH.sp500)/ATH.sp500*100);
     const dayChg = sp500.prev ? ((sp500.px-sp500.prev)/sp500.prev*100) : null;
+    const mom = sp500.ma200 ? ((sp500.px-sp500.ma200)/sp500.ma200*100) : null;
+    RADAR.assets.push({name:'S&P500', short:'S&P', momentum:mom, day:dayChg, price:sp500.px});
     rows.push(renderIndexCard('S&P 500','미국 대형주', sp500.px, dd, ATH.sp500, getStage(dd), dayChg, sp500.belowMA));
   }else{
     rows.push(`<div class="card"><div class="asset-name">S&amp;P 500 <span class="asset-code">미국 대형주</span></div><div class="err">⚠ 조회 실패 — 프록시(/px?syms=^spx) 응답 확인 필요. 최근 확인 ATH: ${fmtNum(ATH.sp500)}</div></div>`);
@@ -301,6 +312,8 @@ async function loadCrypto(){
       const chg7 = coin.price_change_percentage_7d_in_currency;
       const sig = chg7>5?'green':(chg7<-10?'red':'yellow');
       const sparkline = coin.sparkline_in_7d ? coin.sparkline_in_7d.price : null;
+      // 암호화폐는 200일선 데이터가 없어 7일 변동률을 추세 강도로 사용
+      RADAR.assets.push({name:coin.name==='Bitcoin'?'BTC':'ETH', short:coin.symbol.toUpperCase(), momentum:chg7, day:chg24, price:coin.current_price});
       html += `<div class="card">
         <div class="card-top">
           <div><div class="asset-name">${coin.name} <span class="asset-code">${coin.symbol.toUpperCase()}</span></div>
@@ -322,19 +335,25 @@ async function loadCrypto(){
 
 async function loadCommodities(){
   const el = document.getElementById('commodityCards');
-  let gold=null;
-  try{ gold = await fetchStooq('xauusd'); }catch(e){}
+  const gold = await fetchPx('GC=F'); // Yahoo 금 선물
   if(gold){
+    const dayChg = gold.prev ? ((gold.px-gold.prev)/gold.prev*100) : null;
+    const mom = gold.ma200 ? ((gold.px-gold.ma200)/gold.ma200*100) : null;
+    RADAR.assets.push({name:'금', short:'금', momentum:mom, day:dayChg, price:gold.px});
+    const maHtml = gold.belowMA
+      ? `<span style="font-size:10px;color:var(--red);font-weight:700;margin-left:6px;">200일선 ↓</span>`
+      : `<span style="font-size:10px;color:var(--green);font-weight:700;margin-left:6px;">200일선 ↑</span>`;
     el.innerHTML = `<div class="card">
       <div class="card-top">
-        <div><div class="asset-name">금 (Gold) <span class="asset-code">XAU/USD</span></div>
-        <div class="price-row"><span class="price">$${fmtNum(gold,2)}</span></div></div>
+        <div><div class="asset-name">금 (Gold) <span class="asset-code">GC=F</span>${maHtml}</div>
+        <div class="price-row"><span class="price">$${fmtNum(gold.px,2)}</span>
+        ${dayChg!==null?`<span class="chg ${dayChg>=0?'up':'down'}">${dayChg>=0?'▲':'▼'}${fmtNum(Math.abs(dayChg),2)}%</span>`:''}</div></div>
         ${signalChip('yellow')}
       </div>
-      <div class="interpret">안전자산 성격상 증시 조정기에 방어자산 배분 비중으로 활용됩니다.</div>
+      <div class="interpret">안전자산 성격상 증시 조정기 <b>방어자산 배분</b> 비중으로 활용됩니다. ${gold.belowMA?'현재 200일선 아래로, 반등 중이나 장기 추세는 아직 미회복입니다.':'200일선 위로, 안전자산 선호가 유지되는 국면입니다.'}</div>
     </div>`;
   }else{
-    el.innerHTML = `<div class="card"><div class="err">⚠ 금 시세 조회 실패 — 네트워크 제한 가능성</div></div>`;
+    el.innerHTML = `<div class="card"><div class="err">⚠ 금 시세 조회 실패 — 프록시(/px?syms=GC=F) 응답 확인 필요</div></div>`;
   }
 }
 
@@ -368,6 +387,7 @@ async function loadSentiment(){
     const data = await res.json();
     const cur = data.data[0];
     const val = parseInt(cur.value);
+    RADAR.fgi = val;
     const history = data.data.map(d=>parseInt(d.value)).reverse();
     const label = val<=25?'극단적 공포':val<=45?'공포':val<=55?'중립':val<=75?'탐욕':'극단적 탐욕';
     const color = val<=25?'#3ddc84':val<=45?'#4d8bf5':val<=75?'#e8b84b':'#ef5b5b';
@@ -389,9 +409,98 @@ async function loadSentiment(){
   }
 }
 
+// ── 모듈 C: 심리 vs 자금흐름 사분면 차트 ──
+function renderQuadrant(){
+  const el = document.getElementById('quadrantCard');
+  if(RADAR.fgi===null || RADAR.assets.length===0){
+    el.innerHTML = `<div class="card"><div class="err">⚠ 사분면 분석 실패 — 심리·자산 데이터가 아직 부족합니다.</div></div>`;
+    return;
+  }
+
+  const W=320, H=320, pad=34;
+  const cx = pad + (W-2*pad)/2;
+  const cy = pad + (H-2*pad)/2;
+
+  const fgiX = v => pad + (v/100)*(W-2*pad);
+  const MOM_MAX = 20;
+  const momY = m => {
+    const clamped = Math.max(-MOM_MAX, Math.min(MOM_MAX, m||0));
+    return cy - (clamped/MOM_MAX)*(H-2*pad)/2;
+  };
+
+  const fgi = RADAR.fgi;
+  const baseX = fgiX(fgi);
+  const n = RADAR.assets.length;
+
+  let dots = '';
+  RADAR.assets.forEach((a,i)=>{
+    const offset = (i - (n-1)/2) * 14;
+    const px = Math.max(pad+6, Math.min(W-pad-6, baseX + offset));
+    const py = momY(a.momentum);
+    const strong = (a.momentum||0) >= 0;
+    let color = '#8b93a7';
+    if(fgi<45 && strong) color = '#3ddc84';
+    else if(fgi<45 && !strong) color = '#4d8bf5';
+    else if(fgi>=55 && strong) color = '#e8b84b';
+    else if(fgi>=55 && !strong) color = '#ef5b5b';
+    dots += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="6" fill="${color}" stroke="#0b0e14" stroke-width="1.5"/>
+      <text x="${px.toFixed(1)}" y="${(py-10).toFixed(1)}" text-anchor="middle" font-size="10" font-weight="700" fill="${color}">${a.short}</text>`;
+  });
+
+  const quadLabels = `
+    <text x="${pad+6}" y="${pad+14}" font-size="9" fill="#3ddc84" opacity="0.7">숨은 매집 ⭐</text>
+    <text x="${W-pad-6}" y="${pad+14}" text-anchor="end" font-size="9" fill="#e8b84b" opacity="0.7">과열</text>
+    <text x="${pad+6}" y="${H-pad-6}" font-size="9" fill="#4d8bf5" opacity="0.7">바닥 다지기</text>
+    <text x="${W-pad-6}" y="${H-pad-6}" text-anchor="end" font-size="9" fill="#ef5b5b" opacity="0.7">고점 이탈</text>`;
+
+  const svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:340px;display:block;margin:0 auto;">
+    <rect x="${pad}" y="${pad}" width="${(cx-pad).toFixed(1)}" height="${(cy-pad).toFixed(1)}" fill="#3ddc84" opacity="0.05"/>
+    <rect x="${cx}" y="${pad}" width="${(W-pad-cx).toFixed(1)}" height="${(cy-pad).toFixed(1)}" fill="#e8b84b" opacity="0.05"/>
+    <rect x="${pad}" y="${cy}" width="${(cx-pad).toFixed(1)}" height="${(H-pad-cy).toFixed(1)}" fill="#4d8bf5" opacity="0.05"/>
+    <rect x="${cx}" y="${cy}" width="${(W-pad-cx).toFixed(1)}" height="${(H-pad-cy).toFixed(1)}" fill="#ef5b5b" opacity="0.05"/>
+    <line x1="${cx}" y1="${pad}" x2="${cx}" y2="${H-pad}" stroke="#232937" stroke-width="1" stroke-dasharray="3,3"/>
+    <line x1="${pad}" y1="${cy}" x2="${W-pad}" y2="${cy}" stroke="#232937" stroke-width="1" stroke-dasharray="3,3"/>
+    <text x="${pad-4}" y="${pad+2}" text-anchor="end" font-size="8" fill="#8b93a7">강세</text>
+    <text x="${pad-4}" y="${H-pad+2}" text-anchor="end" font-size="8" fill="#8b93a7">약세</text>
+    <text x="${cx}" y="${H-pad+18}" text-anchor="middle" font-size="8" fill="#8b93a7">심리(FGI ${fgi})</text>
+    ${quadLabels}
+    ${dots}
+  </svg>`;
+
+  const goldZone = RADAR.assets.filter(a=>fgi<45 && (a.momentum||0)>=0).map(a=>a.short);
+  const dangerZone = RADAR.assets.filter(a=>fgi>=55 && (a.momentum||0)<0).map(a=>a.short);
+  let verdict = '';
+  if(fgi<45){
+    verdict = goldZone.length>0
+      ? `<b>공포 국면</b>에서 ${goldZone.join(', ')}은(는) 추세가 아직 살아있어 <b style="color:#3ddc84;">숨은 매집(황금) 구간</b>에 위치합니다. 심리는 얼어붙었지만 자금이 버티는 신호로, 역발상 분할매수를 검토할 자리입니다.`
+      : `시장 심리는 <b>공포(FGI ${fgi})</b>이나 대부분 자산의 추세도 함께 약합니다. 좌하단(바닥 다지기) 구간으로, 성급한 매수보다 추세 반전 확인이 먼저입니다.`;
+  }else if(fgi>=55){
+    verdict = dangerZone.length>0
+      ? `<b>탐욕 국면</b>인데 ${dangerZone.join(', ')}의 추세가 꺾이고 있어 <b style="color:#ef5b5b;">고점 이탈 위험</b> 신호입니다. 신규 진입보다 익절·리스크 관리가 우선입니다.`
+      : `심리가 <b>탐욕(FGI ${fgi})</b> 구간입니다. 과열 자산은 분할 익절을, 신규 진입은 신중히 판단하세요.`;
+  }else{
+    verdict = `심리가 <b>중립(FGI ${fgi})</b> 구간이라 뚜렷한 괴리 신호는 약합니다. 각 자산의 추세축(위=강세) 위치로 상대적 강약을 참고하세요.`;
+  }
+
+  el.innerHTML = `<div class="card">
+    ${svg}
+    <div class="interpret" style="border-top:1px dashed var(--line);margin-top:12px;padding-top:10px;">
+      <div style="font-size:11px;color:var(--sub);line-height:1.6;margin-bottom:8px;">
+        가로축 = 시장 심리(공포↔탐욕) · 세로축 = 자산별 추세 강도(지수는 200일선 이격도, 코인은 7일 변동)
+      </div>
+      ${verdict}
+    </div>
+  </div>`;
+}
+
 async function loadAll(){
   document.getElementById('updatedTime').textContent = '갱신 중...';
+  // 사분면용 저장소 초기화(새로고침 시 중복 누적 방지)
+  RADAR.fgi = null;
+  RADAR.assets = [];
+  document.getElementById('quadrantCard').innerHTML = '<div class="loading">사분면 분석 준비 중...</div>';
   await Promise.allSettled([loadStocks(), loadCrypto(), loadCommodities(), loadFx(), loadSentiment()]);
+  renderQuadrant();
   const now = new Date();
   document.getElementById('updatedTime').textContent = '마지막 갱신: ' + now.toLocaleString('ko-KR',{hour:'2-digit',minute:'2-digit',month:'2-digit',day:'2-digit'});
 }
