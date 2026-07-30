@@ -127,6 +127,9 @@
   <div class="section-label">🥇 원자재 / 안전자산</div>
   <div id="commodityCards"><div class="loading">원자재 데이터 로딩 중...</div></div>
 
+  <div class="section-label">💱 환율</div>
+  <div id="fxCards"><div class="loading">환율 로딩 중...</div></div>
+
   <div class="section-label">😨 시장 심리</div>
   <div id="sentimentCards"><div class="loading">심리 지표 로딩 중...</div></div>
 
@@ -139,6 +142,9 @@
 </main>
 
 <script>
+// Cloudflare Worker(ict-proxy) 주소 — Yahoo 지수 데이터를 /px 경로로 중계
+const PROXY_BASE = "https://ict-proxy.a01032767223.workers.dev";
+
 const ATH = {
   kospi: 9385.59,
   sp500: 7620.90
@@ -202,9 +208,27 @@ function signalChip(level){
   return `<div class="signal ${m.cls}"><span class="dot"></span>${m.txt}</div>`;
 }
 
-async function fetchStooq(symbol){
+// /px?syms=심볼 경로로 Yahoo 지수 조회. {px, prev, ma200, belowMA} 반환
+async function fetchPx(symbol){
+  const target = `${PROXY_BASE.replace(/\/$/,'')}/px?syms=${encodeURIComponent(symbol)}`;
   try{
-    const res = await fetch(`https://stooq.com/q/l/?s=${symbol}&f=sd2t2ohlcv&h&e=csv`);
+    const res = await fetch(target);
+    const data = await res.json();
+    // 응답 키는 소문자로 올 수 있으므로 대소문자 무시 매칭
+    const key = Object.keys(data).find(k=>k.toLowerCase()===symbol.toLowerCase());
+    const obj = key ? data[key] : null;
+    if(!obj || obj.px===null || obj.px===undefined) return null;
+    return obj; // {px, prev, ma200, belowMA}
+  }catch(e){ return null; }
+}
+
+// 금(XAU) 등 Stooq 일반 심볼용 — 프록시에 /stooq가 없으면 직접 시도(실패 허용)
+async function fetchStooq(symbol){
+  const target = PROXY_BASE
+    ? `${PROXY_BASE.replace(/\/$/,'')}/stooq?s=${encodeURIComponent(symbol)}`
+    : `https://stooq.com/q/l/?s=${encodeURIComponent(symbol)}&f=sd2t2ohlcv&h&e=csv`;
+  try{
+    const res = await fetch(target);
     const txt = await res.text();
     const lines = txt.trim().split('\n');
     if(lines.length<2) return null;
@@ -217,41 +241,46 @@ async function fetchStooq(symbol){
 
 async function loadStocks(){
   const el = document.getElementById('stockCards');
-  let kospi=null, sp500=null, kospiHist=[], spHist=[];
-  try{ kospi = await fetchStooq('%5Ekospi'); }catch(e){}
-  try{ sp500 = await fetchStooq('%5Espx'); }catch(e){}
+  const kospi = await fetchPx('^KS11');
+  const sp500 = await fetchPx('^spx');
 
   const rows = [];
 
   if(kospi){
-    const dd = ((kospi-ATH.kospi)/ATH.kospi*100);
-    const stage = getStage(dd);
-    rows.push(renderIndexCard('KOSPI','코스피', kospi, dd, ATH.kospi, stage, '#4d8bf5'));
+    const dd = ((kospi.px-ATH.kospi)/ATH.kospi*100);
+    const dayChg = kospi.prev ? ((kospi.px-kospi.prev)/kospi.prev*100) : null;
+    rows.push(renderIndexCard('KOSPI','코스피', kospi.px, dd, ATH.kospi, getStage(dd), dayChg, kospi.belowMA));
   }else{
-    rows.push(`<div class="card"><div class="asset-name">KOSPI <span class="asset-code">코스피</span></div><div class="err">⚠ 실시간 지수 조회 실패 — 네트워크/CORS 제한 가능성. 최근 확인된 ATH: ${fmtNum(ATH.kospi)} (2026.06.19)</div></div>`);
+    rows.push(`<div class="card"><div class="asset-name">KOSPI <span class="asset-code">코스피</span></div><div class="err">⚠ 조회 실패 — 프록시(/px?syms=^KS11) 응답 확인 필요. 최근 확인 ATH: ${fmtNum(ATH.kospi)} (2026.06.19)</div></div>`);
   }
 
   if(sp500){
-    const dd = ((sp500-ATH.sp500)/ATH.sp500*100);
-    const stage = getStage(dd);
-    rows.push(renderIndexCard('S&P 500','미국 대형주', sp500, dd, ATH.sp500, stage, '#4d8bf5'));
+    const dd = ((sp500.px-ATH.sp500)/ATH.sp500*100);
+    const dayChg = sp500.prev ? ((sp500.px-sp500.prev)/sp500.prev*100) : null;
+    rows.push(renderIndexCard('S&P 500','미국 대형주', sp500.px, dd, ATH.sp500, getStage(dd), dayChg, sp500.belowMA));
   }else{
-    rows.push(`<div class="card"><div class="asset-name">S&amp;P 500 <span class="asset-code">미국 대형주</span></div><div class="err">⚠ 실시간 지수 조회 실패 — 네트워크/CORS 제한 가능성. 최근 확인된 ATH: ${fmtNum(ATH.sp500)}</div></div>`);
+    rows.push(`<div class="card"><div class="asset-name">S&amp;P 500 <span class="asset-code">미국 대형주</span></div><div class="err">⚠ 조회 실패 — 프록시(/px?syms=^spx) 응답 확인 필요. 최근 확인 ATH: ${fmtNum(ATH.sp500)}</div></div>`);
   }
 
   el.innerHTML = rows.join('');
 }
 
-function renderIndexCard(name, sub, price, ddPct, ath, stage, accentHex){
+function renderIndexCard(name, sub, price, ddPct, ath, stage, dayChg, belowMA){
   const ddAbs = Math.abs(ddPct);
   const barPct = Math.min(100, (ddAbs/50)*100);
   const barColor = ddAbs<15?'#3ddc84':ddAbs<25?'#e8b84b':ddAbs<35?'#e8b84b':'#ef5b5b';
   const sig = ddAbs<15?'green':ddAbs<35?'yellow':'red';
+  const dayHtml = (dayChg!==null&&dayChg!==undefined)
+    ? `<span class="chg ${dayChg>=0?'up':'down'}">${dayChg>=0?'▲':'▼'}${fmtNum(Math.abs(dayChg),2)}%</span>`
+    : '';
+  const maHtml = belowMA
+    ? `<span style="font-size:10px;color:var(--red);font-weight:700;margin-left:6px;">200일선 ↓</span>`
+    : `<span style="font-size:10px;color:var(--green);font-weight:700;margin-left:6px;">200일선 ↑</span>`;
   return `<div class="card">
     <div class="card-top">
-      <div><div class="asset-name">${name} <span class="asset-code">${sub}</span></div>
-      <div class="price-row"><span class="price">${fmtNum(price,2)}</span>
-      <span class="chg ${ddPct<0?'down':'up'}">${ddPct>=0?'+':''}${fmtNum(ddPct,2)}%</span></div></div>
+      <div><div class="asset-name">${name} <span class="asset-code">${sub}</span>${maHtml}</div>
+      <div class="price-row"><span class="price">${fmtNum(price,2)}</span>${dayHtml}</div>
+      <div style="font-size:11px;color:var(--sub);margin-top:2px;">ATH 대비 <b style="color:${barColor};">${fmtNum(ddPct,2)}%</b></div></div>
       ${signalChip(sig)}
     </div>
     <div class="drawdown-bar-track"><div class="drawdown-bar-fill" style="width:${barPct}%;background:${barColor};"></div></div>
@@ -309,6 +338,29 @@ async function loadCommodities(){
   }
 }
 
+async function loadFx(){
+  const el = document.getElementById('fxCards');
+  // /px?syms=usdkrw 시도 (프록시 diag에서 yahoo_usdkrw OK 확인됨)
+  let fx = await fetchPx('usdkrw');
+  if(!fx) fx = await fetchPx('KRW=X'); // Yahoo 표준 심볼 대체 시도
+  if(fx){
+    const dayChg = fx.prev ? ((fx.px-fx.prev)/fx.prev*100) : null;
+    // 환율은 오를수록(원화약세) 위험회피 신호 → 색 반전 해석
+    const sig = fx.px>1400 ? 'yellow' : 'green';
+    el.innerHTML = `<div class="card">
+      <div class="card-top">
+        <div><div class="asset-name">원/달러 <span class="asset-code">USD/KRW</span></div>
+        <div class="price-row"><span class="price">₩${fmtNum(fx.px,2)}</span>
+        ${dayChg!==null?`<span class="chg ${dayChg>=0?'up':'down'}">${dayChg>=0?'▲':'▼'}${fmtNum(Math.abs(dayChg),2)}%</span>`:''}</div></div>
+        ${signalChip(sig)}
+      </div>
+      <div class="interpret">${fx.px>1400?'<b>원화 약세(1,400원 상회)</b> — 외국인 자금 이탈·위험회피 심리가 반영된 구간입니다. 증시 하방 압력 신호로 함께 봐야 합니다.':'환율이 비교적 안정적인 수준입니다.'}</div>
+    </div>`;
+  }else{
+    el.innerHTML = `<div class="card"><div class="err">⚠ 환율 조회 실패 — /px가 usdkrw 심볼을 지원하지 않을 수 있습니다. 필요 시 Worker에 환율 경로 추가 가능합니다.</div></div>`;
+  }
+}
+
 async function loadSentiment(){
   const el = document.getElementById('sentimentCards');
   try{
@@ -339,7 +391,7 @@ async function loadSentiment(){
 
 async function loadAll(){
   document.getElementById('updatedTime').textContent = '갱신 중...';
-  await Promise.allSettled([loadStocks(), loadCrypto(), loadCommodities(), loadSentiment()]);
+  await Promise.allSettled([loadStocks(), loadCrypto(), loadCommodities(), loadFx(), loadSentiment()]);
   const now = new Date();
   document.getElementById('updatedTime').textContent = '마지막 갱신: ' + now.toLocaleString('ko-KR',{hour:'2-digit',minute:'2-digit',month:'2-digit',day:'2-digit'});
 }
