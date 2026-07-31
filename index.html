@@ -129,6 +129,9 @@
   <div class="section-label">🎯 심리 vs 자금흐름 괴리도 <span style="text-transform:none;font-weight:400;">— 각 자산이 지금 어느 국면인지</span></div>
   <div id="quadrantCard"><div class="loading">사분면 분석 준비 중... (다른 데이터 로딩 후 표시)</div></div>
 
+  <div class="section-label">🚀 조기신호 랭킹 <span style="text-transform:none;font-weight:400;">— 조용히 자금이 몰리는 코인</span></div>
+  <div id="rankingCard"><div class="loading">자금유입 가속도 계산 중...</div></div>
+
   <div class="section-label">🇰🇷 🇺🇸 주식 지수</div>
   <div id="stockCards"><div class="loading">지수 데이터 로딩 중...</div></div>
 
@@ -604,13 +607,109 @@ function renderQuadrant(){
   </div>`;
 }
 
+// ── 모듈 B: 조기신호 랭킹 (암호화폐 자금유입 가속도) ──
+async function loadRanking(){
+  const el = document.getElementById('rankingCard');
+  try{
+    // 거래량 상위 30개 코인 (스테이블코인 제외 대상)
+    const res = await fetch('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&price_change_percentage=24h,7d');
+    const data = await res.json();
+
+    // 스테이블코인·래핑코인 제외 (자금흐름 신호 왜곡)
+    const STABLE = ['tether','usd-coin','dai','first-digital-usd','usds','ethena-usde','binance-usd','trueusd','paxos-standard'];
+    const WRAPPED = ['wrapped-bitcoin','wrapped-steth','wrapped-eeth','staked-ether','weth','coinbase-wrapped-btc','binance-peg-weth'];
+    const coins = data.filter(c=>!STABLE.includes(c.id) && !WRAPPED.includes(c.id) && c.market_cap>0 && c.total_volume>0);
+
+    // 각 코인의 자금유입 가속도 점수 계산
+    const scored = coins.map(c=>{
+      const volRatio = c.total_volume / c.market_cap;         // 거래량/시총 (활발도)
+      const chg24 = c.price_change_percentage_24h_in_currency || 0;
+      const chg7 = c.price_change_percentage_7d_in_currency || 0;
+      // 가속도: 24h가 7일 일평균보다 얼마나 뜨거운지
+      const accel = chg24 - (chg7/7);
+      return {...c, volRatio, chg24, chg7, accel};
+    });
+
+    // 각 지표를 순위 백분위로 정규화 (0~100)
+    function pctRank(arr, key){
+      const sorted = [...arr].sort((a,b)=>a[key]-b[key]);
+      const map = new Map();
+      sorted.forEach((c,i)=>map.set(c.id, (i/(sorted.length-1))*100));
+      return map;
+    }
+    const volMap = pctRank(scored,'volRatio');   // 거래 활발도
+    const accelMap = pctRank(scored,'accel');    // 가속도
+    const momMap = pctRank(scored,'chg24');      // 단기 모멘텀
+
+    scored.forEach(c=>{
+      // 가중치: 가속도 45% + 거래활발도 35% + 모멘텀 20%
+      c.score = accelMap.get(c.id)*0.45 + volMap.get(c.id)*0.35 + momMap.get(c.id)*0.20;
+    });
+
+    // 점수순 정렬 상위 8개
+    const top = scored.sort((a,b)=>b.score-a.score).slice(0,8);
+
+    let rows = '';
+    top.forEach((c,i)=>{
+      const scoreColor = c.score>=70?'#3ddc84':c.score>=50?'#e8b84b':'#8b93a7';
+      const chgColor = c.chg24>=0?'var(--green)':'var(--red)';
+      // "숨은 신호" 배지: 가격은 아직 안 올랐는데(24h<3%) 거래·가속도는 상위
+      const hidden = c.chg24<3 && c.volRatio>=0.15 && accelMap.get(c.id)>=60;
+      const badge = hidden
+        ? `<span style="font-size:9px;color:#3ddc84;border:1px solid #3ddc84;padding:1px 5px;border-radius:8px;margin-left:5px;">숨은 신호 ⭐</span>`
+        : '';
+      rows += `<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line);">
+        <div style="font-size:14px;font-weight:800;color:${scoreColor};width:20px;text-align:center;flex-shrink:0;">${i+1}</div>
+        <img src="${c.image}" width="22" height="22" style="border-radius:50%;flex-shrink:0;" onerror="this.style.display='none'"/>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12.5px;font-weight:700;">${c.symbol.toUpperCase()} ${badge}</div>
+          <div style="font-size:10px;color:var(--sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${c.name}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;">
+          <div style="font-size:11px;font-family:var(--mono);">$${fmtNum(c.current_price, c.current_price>10?2:5)}</div>
+          <div style="font-size:10px;font-family:var(--mono);color:${chgColor};">${c.chg24>=0?'▲':'▼'}${Math.abs(c.chg24).toFixed(1)}%</div>
+        </div>
+        <div style="text-align:center;flex-shrink:0;width:48px;">
+          <div style="font-size:14px;font-weight:800;color:${scoreColor};">${Math.round(c.score)}</div>
+          <div style="font-size:8px;color:var(--sub);">가속도</div>
+        </div>
+      </div>`;
+    });
+
+    // 숨은 신호 코인 요약
+    const hiddenCoins = top.filter(c=>c.chg24<3 && c.volRatio>=0.15 && accelMap.get(c.id)>=60);
+    let interp = '';
+    if(hiddenCoins.length>0){
+      interp = `<b style="color:#3ddc84;">⭐ ${hiddenCoins.map(c=>c.symbol.toUpperCase()).join(', ')}</b>: 가격은 아직 크게 안 올랐는데 거래·자금 가속도가 상위권입니다. 대중 관심이 붙기 전 <b>초기 진입 후보</b>로 관찰할 가치가 있습니다.`;
+    }else{
+      interp = `현재는 가격 상승 없이 조용히 자금만 몰리는 뚜렷한 "숨은 신호" 코인이 보이지 않습니다. 상위권은 이미 가격에 반영이 시작된 코인들이니, 추격보다 되돌림을 노리는 편이 안전합니다.`;
+    }
+
+    el.innerHTML = `<div class="card">
+      <div style="font-size:10.5px;color:var(--sub);line-height:1.55;margin-bottom:8px;">
+        가속도 점수 = 자금유입 속도(45%) + 거래 활발도(35%) + 단기 모멘텀(20%). 시총 상위 50개 중 스테이블·래핑코인 제외.
+      </div>
+      ${rows}
+      <div class="interpret" style="border-top:1px dashed var(--line);margin-top:10px;padding-top:10px;">
+        ${interp}
+      </div>
+      <div style="font-size:9.5px;color:var(--sub);margin-top:8px;line-height:1.5;">
+        ※ "숨은 신호"는 가격 미반영 + 거래 급증 조합을 잡아낸 것으로, 급등 보장이 아닌 관찰 후보입니다. 소형 코인일수록 변동·조작 위험이 큽니다.
+      </div>
+    </div>`;
+  }catch(e){
+    el.innerHTML = `<div class="card"><div class="err">⚠ 조기신호 랭킹 계산 실패: ${e.message}</div></div>`;
+  }
+}
+
 async function loadAll(){
   document.getElementById('updatedTime').textContent = '갱신 중...';
   // 사분면용 저장소 초기화(새로고침 시 중복 누적 방지)
   RADAR.fgi = null;
   RADAR.assets = [];
   document.getElementById('quadrantCard').innerHTML = '<div class="loading">사분면 분석 준비 중...</div>';
-  await Promise.allSettled([loadStocks(), loadCrypto(), loadCommodities(), loadFx(), loadSentiment()]);
+  document.getElementById('rankingCard').innerHTML = '<div class="loading">자금유입 가속도 계산 중...</div>';
+  await Promise.allSettled([loadStocks(), loadCrypto(), loadCommodities(), loadFx(), loadSentiment(), loadRanking()]);
   renderQuadrant();
   const now = new Date();
   document.getElementById('updatedTime').textContent = '마지막 갱신: ' + now.toLocaleString('ko-KR',{hour:'2-digit',minute:'2-digit',month:'2-digit',day:'2-digit'});
