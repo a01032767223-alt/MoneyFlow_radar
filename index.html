@@ -154,6 +154,9 @@
   <div class="section-label">🚀 조기신호 랭킹 <span style="text-transform:none;font-weight:400;">— 조용히 자금이 몰리는 코인</span></div>
   <div id="rankingCard"><div class="loading">자금유입 가속도 계산 중...</div></div>
 
+  <div class="section-label">📈 주식 자금유입 신호 <span style="text-transform:none;font-weight:400;">— 거래량으로 잡는 조용한 매집</span></div>
+  <div id="stockSignalCard"><div class="loading">종목 추세 분석 중...</div></div>
+
   <div class="section-label">🇰🇷 🇺🇸 주식 지수</div>
   <div id="stockCards"><div class="loading">지수 데이터 로딩 중...</div></div>
 
@@ -799,6 +802,151 @@ function toggleTerm(i){
   if(term) term.classList.toggle('open');
 }
 
+// ── 주식 추세전환 신호 (관심 종목군 + S&P 대표) ──
+const STOCK_WATCH = [
+  // 한국 우량주·섹터 (Yahoo: 코드.KS)
+  {sym:'005930.KS', name:'삼성전자', market:'KR', group:'반도체'},
+  {sym:'000660.KS', name:'SK하이닉스', market:'KR', group:'반도체'},
+  {sym:'373220.KS', name:'LG에너지솔루션', market:'KR', group:'2차전지'},
+  {sym:'005490.KS', name:'POSCO홀딩스', market:'KR', group:'소재'},
+  {sym:'329180.KS', name:'HD현대중공업', market:'KR', group:'조선'},
+  {sym:'012450.KS', name:'한화에어로스페이스', market:'KR', group:'방산'},
+  {sym:'042660.KS', name:'한화오션', market:'KR', group:'조선'},
+  {sym:'196170.KQ', name:'알테오젠', market:'KR', group:'바이오'},
+  // S&P 대표 종목
+  {sym:'NVDA', name:'엔비디아', market:'US', group:'반도체'},
+  {sym:'AAPL', name:'애플', market:'US', group:'빅테크'},
+  {sym:'MSFT', name:'마이크로소프트', market:'US', group:'빅테크'},
+  {sym:'GOOGL', name:'알파벳', market:'US', group:'빅테크'},
+  {sym:'AMZN', name:'아마존', market:'US', group:'빅테크'},
+  {sym:'META', name:'메타', market:'US', group:'빅테크'},
+  {sym:'AVGO', name:'브로드컴', market:'US', group:'반도체'},
+  {sym:'TSLA', name:'테슬라', market:'US', group:'전기차'}
+];
+
+async function loadStockSignals(){
+  const el = document.getElementById('stockSignalCard');
+  try{
+    // 종목별 /px 병렬 조회
+    const results = await Promise.all(STOCK_WATCH.map(async s=>{
+      const d = await fetchPx(s.sym);
+      return d ? {...s, ...d} : null;
+    }));
+    const valid = results.filter(r=>r && r.px && r.ma200);
+
+    if(valid.length===0){
+      el.innerHTML = `<div class="card"><div class="err">⚠ 종목 데이터 조회 실패 — 프록시 응답을 확인해주세요.</div></div>`;
+      return;
+    }
+
+    // 각 종목 신호 계산
+    valid.forEach(s=>{
+      s.gap = (s.px - s.ma200)/s.ma200*100;           // 200일선 이격도
+      const rawDay = s.prev ? (s.px - s.prev)/s.prev*100 : 0;
+      // prev가 오래된 기준일 수 있어 ±15% 초과 등락은 신뢰 불가로 간주(표시 보류)
+      s.day = Math.abs(rawDay)<=15 ? rawDay : null;
+      s.surge = (s.volSurge!==null && s.volSurge!==undefined && isFinite(s.volSurge)) ? s.volSurge : null;
+    });
+
+    // 거래량 급증 기준
+    const SURGE_HI = 1.5;  // 평소의 1.5배 이상 = 자금 유입
+    const SURGE_MID = 1.2; // 1.2배 이상 = 관심 증가
+
+    // ① 조용한 매집 ⭐ (핵심 신호): 가격은 조용(이격도 -15%~+8%)한데 거래량 급증(≥1.5배)
+    //    = 아직 크게 안 올랐는데 돈이 몰리기 시작 = 초기 진입 후보
+    const accumulating = valid.filter(s=>s.surge!==null && s.surge>=SURGE_HI && s.gap>=-15 && s.gap<=8)
+      .sort((a,b)=>b.surge-a.surge);
+    // ② 거래 폭발 강세: 200일선 위 강세(이격도>8%) + 거래량 급증(≥1.5배) = 자금 붙은 상승
+    const strongVol = valid.filter(s=>s.surge!==null && s.surge>=SURGE_HI && s.gap>8)
+      .sort((a,b)=>b.surge-a.surge);
+    // ③ 조용한 강세: 200일선 위 강세지만 거래량은 평범 — 지수 약세 속 버티는 종목
+    const accumIds = new Set([...accumulating, ...strongVol].map(s=>s.sym));
+    const strong = valid.filter(s=>s.gap>3 && !accumIds.has(s.sym))
+      .sort((a,b)=>b.gap-a.gap);
+
+    function stockRow(s, mode){
+      const gapColor = s.gap>=0?'var(--green)':'var(--red)';
+      const flag = s.market==='KR'?'🇰🇷':'🇺🇸';
+      let badge = '';
+      if(mode==='accum') badge = `<span style="font-size:9px;color:#3ddc84;border:1px solid #3ddc84;padding:1px 5px;border-radius:8px;margin-left:5px;">조용한 매집 ⭐</span>`;
+      else if(mode==='strongVol') badge = `<span style="font-size:9px;color:#ef5b5b;border:1px solid #ef5b5b;padding:1px 5px;border-radius:8px;margin-left:5px;">거래 폭발 🔥</span>`;
+      else badge = `<span style="font-size:9px;color:#e8b84b;border:1px solid #e8b84b;padding:1px 5px;border-radius:8px;margin-left:5px;">조용한 강세</span>`;
+      const priceStr = s.market==='KR' ? `₩${fmtNum(s.px,0)}` : `$${fmtNum(s.px,2)}`;
+      // 거래량 급증률 표시
+      const surgeStr = s.surge!==null
+        ? (()=>{ const c = s.surge>=1.5?'#3ddc84':s.surge>=1.2?'#e8b84b':'var(--sub)';
+            return `<div style="font-size:11px;font-weight:700;font-family:var(--mono);color:${c};">${s.surge.toFixed(1)}x</div>`; })()
+        : `<div style="font-size:9px;color:var(--sub);">—</div>`;
+      return `<div style="display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid var(--line);">
+        <span style="font-size:13px;flex-shrink:0;">${flag}</span>
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12.5px;font-weight:700;">${s.name} ${badge}</div>
+          <div style="font-size:9.5px;color:var(--sub);">${s.group} · ${s.sym}</div>
+        </div>
+        <div style="text-align:right;flex-shrink:0;">
+          <div style="font-size:11px;font-family:var(--mono);">${priceStr}</div>
+          <div style="font-size:9px;font-family:var(--mono);color:${gapColor};">200일선 ${s.gap>=0?'+':''}${s.gap.toFixed(1)}%</div>
+        </div>
+        <div style="text-align:center;flex-shrink:0;width:42px;">
+          ${surgeStr}
+          <div style="font-size:8px;color:var(--sub);">거래량</div>
+        </div>
+      </div>`;
+    }
+
+    let html = '';
+    // ① 조용한 매집 (핵심)
+    html += `<div style="font-size:11px;font-weight:700;color:#3ddc84;margin:2px 0 4px;">⭐ 조용한 매집 <span style="color:var(--sub);font-weight:400;">— 가격은 잠잠한데 거래량이 터진 종목</span></div>`;
+    if(accumulating.length>0){
+      html += accumulating.slice(0,5).map(s=>stockRow(s,'accum')).join('');
+    }else{
+      html += `<div style="font-size:11px;color:var(--sub);padding:8px 0;">현재 조용히 자금이 몰리는 종목이 없습니다. 거래가 평소 수준입니다.</div>`;
+    }
+    // ② 거래 폭발 강세
+    html += `<div style="font-size:11px;font-weight:700;color:#ef5b5b;margin:14px 0 4px;">🔥 거래 폭발 강세 <span style="color:var(--sub);font-weight:400;">— 이미 오른 데다 거래량까지 급증</span></div>`;
+    if(strongVol.length>0){
+      html += strongVol.slice(0,4).map(s=>stockRow(s,'strongVol')).join('');
+    }else{
+      html += `<div style="font-size:11px;color:var(--sub);padding:8px 0;">거래량 급증을 동반한 강세 종목이 없습니다.</div>`;
+    }
+    // ③ 조용한 강세 (거래량 평범)
+    html += `<div style="font-size:11px;font-weight:700;color:#e8b84b;margin:14px 0 4px;">📊 조용한 강세 <span style="color:var(--sub);font-weight:400;">— 지수 약세에도 200일선 위 버팀</span></div>`;
+    if(strong.length>0){
+      html += strong.slice(0,4).map(s=>stockRow(s,'strong')).join('');
+    }else{
+      html += `<div style="font-size:11px;color:var(--sub);padding:8px 0;">200일선 위 강세 종목이 없습니다.</div>`;
+    }
+
+    // 종합 해석
+    let interp = '';
+    if(accumulating.length>0){
+      const names = accumulating.slice(0,3).map(s=>`${s.name}(${s.surge.toFixed(1)}배)`).join(', ');
+      interp = `<b style="color:#3ddc84;">⭐ ${names}</b>: 가격은 아직 크게 안 움직였는데 거래량이 평소보다 크게 늘었습니다. 대중이 주목하기 전 <b>조용히 자금이 들어오는 초기 신호</b>로, 가장 눈여겨볼 종목들입니다.`;
+    }else if(strongVol.length>0){
+      interp = `<b style="color:#ef5b5b;">${strongVol.slice(0,2).map(s=>s.name).join(', ')}</b> 등은 이미 강세인 데다 거래량까지 급증 중입니다. 자금이 확실히 붙었지만 이미 오른 상태라, 추격보다 눌림목을 기다리는 편이 안전합니다.`;
+    }else if(strong.length>0){
+      interp = `거래량 급증 신호는 없으나 <b style="color:#e8b84b;">${strong.slice(0,2).map(s=>s.name).join(', ')}</b> 등이 지수 약세 속에서도 200일선 위를 지키고 있습니다. 자금이 빠지지 않고 버티는 섹터로 볼 수 있습니다.`;
+    }else{
+      interp = `관심 종목 대부분이 약세이며 뚜렷한 거래량 신호도 없습니다. 개별 종목보다 지수 분할매수(광범위지수)로 접근하는 편이 안전한 구간입니다.`;
+    }
+
+    el.innerHTML = `<div class="card">
+      <div style="font-size:10.5px;color:var(--sub);line-height:1.55;margin-bottom:10px;">
+        거래량 급증률(오늘 ÷ 20일 평균)과 200일선 이격도를 결합. <b style="color:#3ddc84;">1.5배 이상</b>이면 자금 유입 신호입니다.
+      </div>
+      ${html}
+      <div class="interpret" style="border-top:1px dashed var(--line);margin-top:12px;padding-top:10px;">
+        ${interp}
+      </div>
+      <div style="font-size:9.5px;color:var(--sub);margin-top:8px;line-height:1.5;">
+        ※ "조용한 매집"은 가격 미반영 + 거래량 급증 조합으로, 급등 보장이 아닌 관찰 후보입니다. 실적발표·배당락 등 일시적 거래 급증도 섞일 수 있어 개별 확인이 필요합니다.
+      </div>
+    </div>`;
+  }catch(e){
+    el.innerHTML = `<div class="card"><div class="err">⚠ 주식 신호 계산 실패: ${e.message}</div></div>`;
+  }
+}
+
 async function loadAll(){
   document.getElementById('updatedTime').textContent = '갱신 중...';
   // 사분면용 저장소 초기화(새로고침 시 중복 누적 방지)
@@ -806,7 +954,8 @@ async function loadAll(){
   RADAR.assets = [];
   document.getElementById('quadrantCard').innerHTML = '<div class="loading">사분면 분석 준비 중...</div>';
   document.getElementById('rankingCard').innerHTML = '<div class="loading">자금유입 가속도 계산 중...</div>';
-  await Promise.allSettled([loadStocks(), loadCrypto(), loadCommodities(), loadFx(), loadSentiment(), loadRanking()]);
+  document.getElementById('stockSignalCard').innerHTML = '<div class="loading">종목 추세 분석 중...</div>';
+  await Promise.allSettled([loadStocks(), loadCrypto(), loadCommodities(), loadFx(), loadSentiment(), loadRanking(), loadStockSignals()]);
   renderQuadrant();
   const now = new Date();
   document.getElementById('updatedTime').textContent = '마지막 갱신: ' + now.toLocaleString('ko-KR',{hour:'2-digit',minute:'2-digit',month:'2-digit',day:'2-digit'});
